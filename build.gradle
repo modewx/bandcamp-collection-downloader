@@ -1,0 +1,44 @@
+plugins {
+    id 'org.jetbrains.kotlin.jvm' version '1.3.71'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+repositories {
+    mavenCentral()
+}
+dependencies {
+    compile 'org.jetbrains.kotlin:kotlin-stdlib-jdk8'
+    compile 'org.jsoup:jsoup:1.11.3'
+    compile 'org.zeroturnaround:zt-zip:1.13'
+    compile 'org.slf4j:slf4j-simple:1.6.4'
+    compile 'com.sun.mail:javax.mail:1.6.1'
+    compile 'info.picocli:picocli:3.4.0'
+    compile 'com.google.code.gson:gson:2.8.5'
+    compile 'org.ini4j:ini4j:0.5.4'
+    compile 'org.xerial:sqlite-jdbc:3.25.2'
+    testCompile 'org.junit.jupiter:junit-jupiter-api:5.2.0'
+    testRuntime 'org.junit.jupiter:junit-jupiter-engine:5.2.0'
+}
+compileKotlin {
+    kotlinOptions {
+        jvmTarget = "11"
+    }
+}
+compileTestKotlin {
+    kotlinOptions {
+        jvmTarget = "11"
+    }
+}
+
+//create a single Jar with all dependencies
+task fatJar(type: Jar) {
+    manifest {
+        attributes 'Main-Class': 'bandcampcollectiondownloader.MainKt'
+    }
+    archiveBaseName.set("bandcamp-collection-downloader")
+    from { configurations.compile.collect { it.isDirectory() ? it : zipTree(it) } }
+    with jar
+}

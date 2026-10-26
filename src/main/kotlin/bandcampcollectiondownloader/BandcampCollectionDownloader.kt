@@ -1,0 +1,249 @@
+package bandcampcollectiondownloader
+
+import org.zeroturnaround.zip.ZipUtil
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
+import java.time.Instant
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatterBuilder
+import java.time.temporal.ChronoField
+import java.util.*
+import java.util.concurrent.*
+import java.time.LocalDateTime
+import java.io.File
+
+object BandcampCollectionDownloader {
+
+    class Cache constructor(private val path: Path) {
+		public val contentSet = readContentFromFile().toSet()
+        fun readContentFromFile(): List<String> {
+            if (!path.toFile().exists()) {
+                return emptyList()
+            }
+            return path.toFile().readLines()
+        }
+
+        fun add(line: String) {
+            if (!Files.exists(path)) {
+                Files.createFile(path)
+            }
+            path.toFile().appendText(line + "\n")
+        }
+    }
+
+
+    /**
+     * Core function called from the Main function.
+     */
+    fun downloadAll(args: Args) {
+        Util.log("Target bandcamp account: " + args.bandcampUser)
+        Util.log("Target download folder: " + args.pathToDownloadFolder.toAbsolutePath().normalize())
+        Util.log("Target audio format: " + args.audioFormat)
+        Util.logSeparator()
+
+        val cookies =
+
+                if (args.pathToCookiesFile != null) {
+                    // Parse JSON cookies (obtained with "Cookie Quick Manager" Firefox addon)
+                    Util.log("Loading provided cookies file…")
+                    CookiesManagement.retrieveCookiesFromFile(args.pathToCookiesFile!!)
+                } else {
+                    // Try to find cookies stored in default firefox profile
+                    Util.log("No provided cookies file, using Firefox cookies…")
+                    CookiesManagement.retrieveFirefoxCookies()
+                }
+        Util.log("Loaded cookies from: " + cookies.source)
+        Util.logSeparator()
+
+        // Connect to bandcamp
+        Util.log("Connecting to Bandcamp…")
+        val connector = BandcampAPIConnector(args.bandcampUser, cookies.content, args.timeout, args.retries, args.skipHiddenItems)
+        connector.init()
+        val pageName = connector.getBandcampPageName()
+		Util.log("""Name filter ${args.stringFilter}. To download ${args.number} items""")
+		val saleItems = connector.getAllSaleItemIDs(args.stringFilter, args.number)
+        Util.log("""Found "$pageName" with ${saleItems.size} items.""")
+
+        // Prepare/load cache file
+        val cacheFilePath = args.pathToDownloadFolder.resolve("bandcamp-collection-downloader.cache")
+        val cache = Cache(cacheFilePath)
+        val cacheContent = cache.contentSet
+
+        // Only work on items that have not been downloaded yet
+        val itemsToDownload = 
+			if (args.force) { 
+				saleItems
+			} else {
+				saleItems.filter { saleItemId -> saleItemId !in cacheContent }
+			}
+        val alreadyDownloadedItemsCount = saleItems.size - itemsToDownload.size
+        if (alreadyDownloadedItemsCount > 0) {
+            Util.log("Ignoring $alreadyDownloadedItemsCount already downloaded items (based on '${cacheFilePath.toAbsolutePath().normalize()}').")
+        }
+
+        Util.logSeparator()
+
+        // Prepare for parallel downloads
+        val queue = ArrayBlockingQueue<Runnable>(50000)
+        val threadPoolExecutor = ThreadPoolExecutor(args.jobs, args.jobs, 0, TimeUnit.HOURS, queue)
+
+        // For each release of the bandcamp account that is yet to be downloaded
+        for (saleItemId in itemsToDownload) {
+
+            // Prepare a task to run in a thread or not
+            val task = Runnable {
+                val itemNumber = itemsToDownload.indexOf(saleItemId) + 1
+                Util.log("Managing item $itemNumber/${itemsToDownload.size}")
+
+                try {
+                    manageDownloadPage(connector, saleItemId, args, cache, args.preorders, args.force)
+                } catch (e: BandCampDownloaderError) {
+                    Util.log("Could not download item: " + e.message)
+                }
+            }
+
+            // Use threads only if j is more than 1
+            if (args.jobs > 1) {
+                threadPoolExecutor.execute(task)
+            } else {
+                task.run()
+            }
+        }
+
+        // To make sure we quit once all is done
+        threadPoolExecutor.shutdown()
+    }
+
+    private fun manageDownloadPage(connector: BandcampAPIConnector, saleItemId: String, args: Args, cache: Cache, downloadPreorders: Boolean = false, force: Boolean = false) {
+
+        val digitalItem = connector.retrieveDigitalItemData(saleItemId)
+
+        // If null, then the download page is simply invalid and not usable anymore, therefore it can be added to the cache
+        if (digitalItem == null) {
+            Util.log("Sale Item ID $saleItemId cannot be downloaded anymore (maybe a refund?); skipping")
+            cache.add(saleItemId)
+            return
+        }
+
+        // Get data (1)
+        var releasetitle = digitalItem.title
+        var artist = digitalItem.artist
+        var releaseUTC : ZonedDateTime? = null
+		
+		// var releaseYear ZonedDateTime.now().get(ChronoField.YEAR).toString()
+        // var releaseYear: CharSequence = "0000"
+		
+		var isPreorder = false
+
+        // Skip preorders
+        val dateFormatter = DateTimeFormatterBuilder().parseCaseInsensitive().appendPattern("dd MMM yyyy HH:mm:ss zzz").toFormatter(Locale.ENGLISH)
+
+        val releaseYear = 
+			if (digitalItem.package_release_date != null) {
+				releaseUTC = ZonedDateTime.parse(digitalItem.package_release_date, dateFormatter)
+				releaseUTC.get(ChronoField.YEAR).toString()
+			}
+			else {
+				ZonedDateTime.now().get(ChronoField.YEAR).toString()
+			}
+        val printableReleaseName = """"${digitalItem.title}" ($releaseYear) by ${digitalItem.artist}"""
+
+        Util.log("""Found release $printableReleaseName (Bandcamp ID: $saleItemId).""")
+
+        if (releaseUTC != null && releaseUTC.toInstant() > Instant.now()) {
+			isPreorder = true
+			if (!downloadPreorders) {
+				Util.log("$printableReleaseName is a preorder; skipping.")
+				return
+			}
+			if (cache.contentSet.contains(saleItemId + "_pre") && !force) {
+				Util.log("$printableReleaseName has been already downloaded as a preorder; skipping.")
+				return
+			}
+        }
+
+        // Get data (2)
+        val isSingleTrack: Boolean = digitalItem.download_type == "t"
+
+        // Exit if no download URL can be found with the chosen audio format
+        connector.retrieveRealDownloadURL(saleItemId, args.audioFormat)
+                ?: throw BandCampDownloaderError("No URL found for item (maybe the release has no digital item, or the provided download format is invalid)")
+
+        // Replace invalid chars by similar unicode chars
+        releasetitle = Util.replaceInvalidCharsByUnicode(releasetitle)
+        artist = Util.replaceInvalidCharsByUnicode(artist)
+
+        // Prepare artist and release folder
+        val releaseFolderName = "$releaseYear - $releasetitle"
+		
+        val artistFolderPath = Paths.get("${args.pathToDownloadFolder}").resolve(artist)
+        val releaseFolderPath = artistFolderPath.resolve(releaseFolderName)
+        val coverURL = connector.getCoverURL(saleItemId)
+
+        Util.log("Starting the download of $printableReleaseName.")
+
+        // Download release, with as many retries as configured
+        Util.retry({
+            val downloadUrl = connector.retrieveRealDownloadURL(saleItemId, args.audioFormat)!!
+            val downloaded = downloadRelease(downloadUrl, releaseFolderPath, isSingleTrack, args.timeout, coverURL)
+            if (downloaded) {
+                Util.log("$printableReleaseName successfully downloaded.")
+            } else {
+                Util.log("$printableReleaseName already exists on disk, skipping.")
+            }
+            if (saleItemId !in cache.contentSet) {
+				val cacheSaleItemId = if (isPreorder) {
+					saleItemId + "_pre"
+				}
+				else {
+					saleItemId
+				}
+                cache.add(cacheSaleItemId)
+            }
+        }, args.retries, args.ignoreFailedReleases)
+
+    }
+
+
+    private fun downloadRelease(fileURL: String, releaseFolderPath: Path, isSingleTrack: Boolean, timeout: Int, coverURL: String): Boolean {
+
+        // If the release folder does not exist, we create it
+        if (!Files.exists(releaseFolderPath)) {
+            Files.createDirectories(releaseFolderPath)
+        }
+
+
+        // If the folder is empty, or if it only contains the zip.part file, we proceed
+		// Not needed as the cache mechanism should govern deciding to download or not
+        val amountFiles = releaseFolderPath.toFile().listFiles()!!.size
+        //if (amountFiles < 1) {
+
+            // Download content
+            val outputFilePath: Path = Util.downloadFile(fileURL, releaseFolderPath, timeout = timeout)
+
+            // If this is a zip, we unzip
+            if (!isSingleTrack) {
+
+                // Unzip
+                try {
+                    ZipUtil.unpack(outputFilePath.toFile(), releaseFolderPath.toFile())
+					// ZipUtil.explode(outputFilePath.toFile());
+                } finally {
+                    // Delete zip
+                    Files.delete(outputFilePath)
+                }
+            }
+
+            // Else if this is a single track, we just fetch the cover
+            else {
+                Util.downloadFile(coverURL, releaseFolderPath, "cover.jpg", timeout)
+            }
+			val currentTime = LocalDateTime.now()
+			File(releaseFolderPath.getParent().resolve("log.txt").toString()).writeText("$currentTime - $fileURL")
+            return true
+        //} else {
+          //  return false
+        //}
+    }
+}

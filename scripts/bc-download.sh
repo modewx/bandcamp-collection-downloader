@@ -1,0 +1,1 @@
+java -jar ~/Scripts/bc-download/bandcamp-collection-downloader-master/build/libs/bandcamp-collection-downloader.jar --download-folder="/Volumes/Stationary Backup/Music/Collection" -a aiff-lossless -n 300 -s -p --cookies-file=/Users/alvaroh/Scripts/bc-download/cookies.txt herrasti

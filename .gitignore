@@ -1,0 +1,21 @@
+# Gradle
+/.gradle/
+build/
+/out/
+/bin/
+
+# Packaged / downloaded JARs (built via `gradle fatJar`)
+*.jar
+# ...but keep the Gradle wrapper jar so the project builds without a system Gradle.
+!gradle/wrapper/gradle-wrapper.jar
+
+# Runtime output and cache from the downloader itself
+/Downloads/
+*.cache
+
+# IntelliJ IDEA
+.idea/
+*.iml
+
+# macOS
+.DS_Store
