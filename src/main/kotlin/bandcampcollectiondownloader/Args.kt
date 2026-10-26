@@ -63,6 +63,15 @@ data class Args(
 		
 		@CommandLine.Option(names = ["--force", "-f"], required = false,
                 description = ["Ignore cache and force download.", """(default: false)"""])
-        var force: Boolean = false
+        var force: Boolean = false,
+
+        @CommandLine.Option(names = ["--item-id", "-i"], required = false, split = ",",
+                description = ["Download exactly these collection items: a<album id>, t<track id> or the item's Bandcamp URL.",
+                    "Repeatable or comma-separated. Respects the cache unless --force; --string-filter and --number are ignored."])
+        var itemIds: List<String> = ArrayList(),
+
+        @CommandLine.Option(names = ["--user-agent"], required = false,
+                description = ["The User-Agent sent with every request (default: the HTTP libraries' own)."])
+        var userAgent: String? = null
 
 )

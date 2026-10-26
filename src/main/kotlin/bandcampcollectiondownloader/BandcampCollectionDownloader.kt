@@ -41,6 +41,7 @@ object BandcampCollectionDownloader {
         Util.log("Target download folder: " + args.pathToDownloadFolder.toAbsolutePath().normalize())
         Util.log("Target audio format: " + args.audioFormat)
         Util.logSeparator()
+        Util.userAgent = args.userAgent
 
         val cookies =
 
@@ -61,8 +62,18 @@ object BandcampCollectionDownloader {
         val connector = BandcampAPIConnector(args.bandcampUser, cookies.content, args.timeout, args.retries, args.skipHiddenItems)
         connector.init()
         val pageName = connector.getBandcampPageName()
-		Util.log("""Name filter ${args.stringFilter}. To download ${args.number} items""")
-		val saleItems = connector.getAllSaleItemIDs(args.stringFilter, args.number)
+		val saleItems =
+			if (args.itemIds.isNotEmpty()) {
+				Util.log("Items: ${args.itemIds.joinToString(", ")}")
+				val found = connector.getSaleItemIDsFor(args.itemIds)
+				if (found.isEmpty()) {
+					throw BandCampDownloaderError("None of the requested items are in the collection: ${args.itemIds.joinToString(", ")}")
+				}
+				found
+			} else {
+				Util.log("""Name filter ${args.stringFilter}. To download ${args.number} items""")
+				connector.getAllSaleItemIDs(args.stringFilter, args.number)
+			}
         Util.log("""Found "$pageName" with ${saleItems.size} items.""")
 
         // Prepare/load cache file
@@ -182,6 +193,7 @@ object BandcampCollectionDownloader {
         val coverURL = connector.getCoverURL(saleItemId)
 
         Util.log("Starting the download of $printableReleaseName.")
+        Util.log("Release folder: ${releaseFolderPath.toAbsolutePath().normalize()}")
 
         // Download release, with as many retries as configured
         Util.retry({

@@ -59,8 +59,34 @@ class BandcampAPIConnector constructor(
 	private data class ItemMetadata(
 			val sale_item_id: Long,
 			val band_name: String,
-			val album_title: String
+			val album_title: String,
+			val tralbum_type: String? = null,
+			val tralbum_id: Long? = null,
+			val item_url: String? = null
 	)
+
+	private fun normalizeUrl(url: String): String =
+			url.substringBefore("?").substringBefore("#").trimEnd('/').replace("http://", "https://").toLowerCase(Locale.ROOT)
+
+	private fun matchesItem(item: ItemMetadata, wanted: String): Boolean {
+		val w = wanted.trim()
+		if (w.startsWith("http")) {
+			return item.item_url != null && normalizeUrl(item.item_url) == normalizeUrl(w)
+		}
+		return item.tralbum_type != null && item.tralbum_id != null && "${item.tralbum_type}${item.tralbum_id}" == w
+	}
+
+	/** Sale item IDs of exactly the requested items (a<id>, t<id> or item URLs), in collection order. */
+	fun getSaleItemIDsFor(itemIds: List<String>): List<String> {
+		init()
+		val wanted = itemIds.map { it.trim() }.filter { it.isNotEmpty() }
+		val missing = wanted.filter { w -> saleItemIDSequence.none { matchesItem(it, w) } }
+		if (missing.isNotEmpty()) {
+			Util.log("Not in the collection: ${missing.joinToString(", ")}")
+		}
+		return saleItemIDSequence.filter { item -> wanted.any { matchesItem(item, it) } }
+				.map { item -> "p" + item.sale_item_id }.distinct()
+	}
 	
 	private data class CollectionSequence(
 		val items: List<ItemMetadata>
@@ -106,7 +132,7 @@ class BandcampAPIConnector constructor(
             val doc =
                     Util.retry({
                         try {
-                            Jsoup.connect("https://bandcamp.com/$bandcampUser")
+                            Util.connect("https://bandcamp.com/$bandcampUser")
                                     .timeout(timeout)
                                     .cookies(cookies)
                                     .get()
@@ -176,7 +202,7 @@ class BandcampAPIConnector constructor(
                     // Append download pages from this api endpoint as well
                     val theRest =
                             Util.retry({
-                                Jsoup.connect("https://bandcamp.com/api/fancollection/1/collection_items")
+                                Util.connect("https://bandcamp.com/api/fancollection/1/collection_items")
                                         .ignoreContentType(true)
                                         .timeout(timeout)
                                         .cookies(cookies)
@@ -226,7 +252,7 @@ class BandcampAPIConnector constructor(
             // Append download pages from this api endpoint as well
             val theRest =
                 Util.retry({
-                    Jsoup.connect("https://bandcamp.com/api/fancollection/1/${collectionName}")
+                    Util.connect("https://bandcamp.com/api/fancollection/1/${collectionName}")
                         .ignoreContentType(true)
                         .timeout(timeout)
                         .cookies(cookies)
@@ -295,7 +321,7 @@ class BandcampAPIConnector constructor(
             // Get page content
             Util.retry({
                 try {
-                    val downloadPage = Jsoup.connect(saleItemURL)
+                    val downloadPage = Util.connect(saleItemURL)
                             .cookies(cookies)
                             .timeout(timeout).get()
 
@@ -346,7 +372,7 @@ class BandcampAPIConnector constructor(
 
         // Get statdownload JSON
         val statedownloadUglyBody: String = Util.retry({
-            Jsoup.connect(statdownloadURL)
+            Util.connect(statdownloadURL)
                     .cookies(cookies)
                     .timeout(timeout)
                     .get().body().select("body")[0].text().toString()

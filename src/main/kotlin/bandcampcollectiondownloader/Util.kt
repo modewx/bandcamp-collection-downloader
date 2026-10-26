@@ -11,6 +11,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.function.BiPredicate
 import javax.mail.internet.ContentDisposition
 import kotlin.streams.toList
+import org.jsoup.Connection
+import org.jsoup.Jsoup
 
 
 object Util {
@@ -18,6 +20,15 @@ object Util {
     private const val BUFFER_SIZE = 4096
 
     private val parallelDownloadsProgresses: MutableMap<String, String> = ConcurrentHashMap()
+
+    /** Set from --user-agent; null keeps the libraries' defaults. */
+    var userAgent: String? = null
+
+    fun connect(url: String?): Connection {
+        val connection = Jsoup.connect(url)
+        userAgent?.let { connection.userAgent(it) }
+        return connection
+    }
 
     /**
      * From http://www.codejava.net/java-se/networking/use-httpurlconnection-to-download-file-from-an-http-url
@@ -27,6 +38,7 @@ object Util {
         // Prepare HTTP connection
         val url = URL(fileURL)
         val httpConn = url.openConnection() as HttpURLConnection
+        userAgent?.let { httpConn.setRequestProperty("User-Agent", it) }
         httpConn.connectTimeout = timeout
         httpConn.readTimeout = timeout
         val responseCode = httpConn.responseCode
