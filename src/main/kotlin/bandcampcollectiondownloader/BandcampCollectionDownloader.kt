@@ -24,6 +24,7 @@ object BandcampCollectionDownloader {
             return path.toFile().readLines()
         }
 
+        @Synchronized  // the download threads share the cache file
         fun add(line: String) {
             if (!Files.exists(path)) {
                 Files.createFile(path)
@@ -76,6 +77,9 @@ object BandcampCollectionDownloader {
 			}
         Util.log("""Found "$pageName" with ${saleItems.size} items.""")
 
+        // What each sale item was asked for as, so every line about it can be tied to it
+        val requestedIds = if (args.itemIds.isNotEmpty()) connector.requestedIDsFor(args.itemIds) else emptyMap()
+
         // Prepare/load cache file
         val cacheFilePath = args.pathToDownloadFolder.resolve("bandcamp-collection-downloader.cache")
         val cache = Cache(cacheFilePath)
@@ -105,12 +109,17 @@ object BandcampCollectionDownloader {
             // Prepare a task to run in a thread or not
             val task = Runnable {
                 val itemNumber = itemsToDownload.indexOf(saleItemId) + 1
-                Util.log("Managing item $itemNumber/${itemsToDownload.size}")
+                val requested = requestedIds[saleItemId]
+                // e.g. "Managing item 2/6: t3716152796 (p408218550)": this thread's next lines are about that item
+                Util.log("Managing item $itemNumber/${itemsToDownload.size}: " +
+                        if (requested != null) "$requested ($saleItemId)" else saleItemId)
 
                 try {
                     manageDownloadPage(connector, saleItemId, args, cache, args.preorders, args.force)
                 } catch (e: BandCampDownloaderError) {
                     Util.log("Could not download item: " + e.message)
+                } catch (e: Throwable) {  // never let a thread die silently
+                    Util.log("Could not download item: " + Util.describe(e))
                 }
             }
 
@@ -172,6 +181,7 @@ object BandcampCollectionDownloader {
 				Util.log("$printableReleaseName has been already downloaded as a preorder; skipping.")
 				return
 			}
+			Util.log("$printableReleaseName is a preorder (out ${releaseUTC.toLocalDate()}); downloading what's out now.")
         }
 
         // Get data (2)

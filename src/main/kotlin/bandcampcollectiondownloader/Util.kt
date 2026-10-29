@@ -12,7 +12,9 @@ import java.util.function.BiPredicate
 import javax.mail.internet.ContentDisposition
 import kotlin.streams.toList
 import org.jsoup.Connection
+import org.jsoup.HttpStatusException
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 
 
 object Util {
@@ -158,9 +160,30 @@ object Util {
     }
 
 
+    /** The exception in one line; an HTTP error with its status (jsoup's message leaves it out), never its URL. */
+    fun describe(e: Throwable): String =
+            if (e is HttpStatusException) "${e.javaClass.name}: ${e.message}. Status=${e.statusCode}"
+            else "${e.javaClass.name}: ${e.message}"
+
+    private val CHALLENGE_TITLE = Regex("""<title>\s*Client Challenge\s*</title>""", RegexOption.IGNORE_CASE)
+
+    /** Bandcamp's bot check: never retry past it. */
+    fun checkNotChallenged(page: Document, what: String) {
+        if (page.title().contains("Client Challenge", ignoreCase = true)) {
+            throw GiveUpError("$what: Client Challenge (Bandcamp's bot check); giving up")
+        }
+    }
+
+    fun checkNotChallenged(body: String, what: String) {
+        if (CHALLENGE_TITLE.containsMatchIn(body)) {
+            throw GiveUpError("$what: Client Challenge (Bandcamp's bot check); giving up")
+        }
+    }
+
     fun <T> retry(function: () -> T, retries: Int, ignoreFailure: Boolean = false): T? {
         // Download release, with as many retries as configured
         val attempts = retries + 1
+        var last: Throwable? = null
         for (i in 1..attempts) {
             if (i > 1) {
                 log("Retrying (${i - 1}/${retries}).")
@@ -168,11 +191,14 @@ object Util {
             }
             try {
                 return function()
+            } catch (e: GiveUpError) {
+                throw e
             } catch (e: Throwable) {
-                log("""Error while trying: "${e.javaClass.name}: ${e.message}".""")
+                last = e
+                log("""Error while trying: "${describe(e)}".""")
             }
         }
-        val message = "Could not perform task after $retries retries."
+        val message = "Could not perform task after $retries retries (last: ${last?.let { describe(it) }})."
         if (ignoreFailure) {
             log(message)
             return null

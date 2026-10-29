@@ -5,6 +5,7 @@ import org.jsoup.Connection.Method
 import org.jsoup.HttpStatusException
 import org.jsoup.Jsoup
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.Pattern
 
 import java.time.Instant
@@ -20,8 +21,11 @@ class BandcampAPIConnector constructor(
     private var bandcampPageName: String? = null
     private val gson = Gson()
 
-    private val saleItemsIDs2saleItemsURLs: MutableMap<String, String> = HashMap<String, String>()
-    private val saleItemsIDs2digitalItems: MutableMap<String, DigitalItem?> = HashMap<String, DigitalItem?>()
+    // Shared by the download threads (--jobs): concurrent maps. A download page that's gone (404) is in
+    // goneSaleItemIDs, since a ConcurrentHashMap can't hold null.
+    private val saleItemsIDs2saleItemsURLs: MutableMap<String, String> = ConcurrentHashMap<String, String>()
+    private val saleItemsIDs2digitalItems: MutableMap<String, DigitalItem> = ConcurrentHashMap<String, DigitalItem>()
+    private val goneSaleItemIDs: MutableSet<String> = ConcurrentHashMap.newKeySet<String>()
 	private val saleItemIDSequence: MutableList<ItemMetadata> = ArrayList<ItemMetadata>()
 
     private var initialized: Boolean = false
@@ -87,6 +91,18 @@ class BandcampAPIConnector constructor(
 		return saleItemIDSequence.filter { item -> wanted.any { matchesItem(item, it) } }
 				.map { item -> "p" + item.sale_item_id }.distinct()
 	}
+
+	/** For each sale item ID of the requested items, the id it was asked for as (a<id>, t<id> or URL). */
+	fun requestedIDsFor(itemIds: List<String>): Map<String, String> {
+		init()
+		val wanted = itemIds.map { it.trim() }.filter { it.isNotEmpty() }
+		val requested = LinkedHashMap<String, String>()
+		for (item in saleItemIDSequence) {
+			val w = wanted.firstOrNull { matchesItem(item, it) } ?: continue
+			requested.putIfAbsent("p" + item.sale_item_id, w)
+		}
+		return requested
+	}
 	
 	private data class CollectionSequence(
 		val items: List<ItemMetadata>
@@ -132,10 +148,12 @@ class BandcampAPIConnector constructor(
             val doc =
                     Util.retry({
                         try {
-                            Util.connect("https://bandcamp.com/$bandcampUser")
+                            val page = Util.connect("https://bandcamp.com/$bandcampUser")
                                     .timeout(timeout)
                                     .cookies(cookies)
                                     .get()
+                            Util.checkNotChallenged(page, "Fan page")
+                            page
                         } catch (e: HttpStatusException) {
                             if (e.statusCode == 404) {
                                 throw BandCampDownloaderError("The bandcamp user '$bandcampUser' does not exist.")
@@ -211,6 +229,7 @@ class BandcampAPIConnector constructor(
                                         .execute()
                             }, retries)
 
+                    Util.checkNotChallenged(theRest!!.body(), "Collection")
                     val parsedCollectionData = gson.fromJson(theRest!!.body(), ParsedCollectionItems::class.java)
 					
 					val parsedCollectionSequence = gson.fromJson(theRest!!.body(), CollectionSequence::class.java)
@@ -261,6 +280,7 @@ class BandcampAPIConnector constructor(
                         .execute()
                 }, retries)
 
+            Util.checkNotChallenged(theRest!!.body(), "Hidden items")
             val parsedCollectionData = gson.fromJson(theRest!!.body(), ParsedCollectionItems::class.java)
             collection.putAll(parsedCollectionData.redownload_urls)
 
@@ -314,29 +334,33 @@ class BandcampAPIConnector constructor(
     fun retrieveDigitalItemData(saleItemID: String): DigitalItem? {
         init()
 
-        if (!this.saleItemsIDs2digitalItems.containsKey(saleItemID)) {
+        if (saleItemID !in this.saleItemsIDs2digitalItems && saleItemID !in this.goneSaleItemIDs) {
 
             val saleItemURL = this.saleItemsIDs2saleItemsURLs[saleItemID]
+                    ?: throw GiveUpError("No download page for $saleItemID in the collection's download links")
 
             // Get page content
             Util.retry({
-                try {
-                    val downloadPage = Util.connect(saleItemURL)
-                            .cookies(cookies)
-                            .timeout(timeout).get()
-
-                    // Get data blob
-                    val downloadPageJson = downloadPage.select("#pagedata").attr("data-blob")
-                    val data = gson.fromJson(downloadPageJson, ParsedBandcampData::class.java)
-                    this.saleItemsIDs2digitalItems[saleItemID] = data.digital_items[0]
-
-                } catch (e: HttpStatusException) {
-
-                    // If 404, then the download page is not usable anymore for some reason (eg. a refund was given for the purchase)
-                    if (e.statusCode == 404)
-                        this.saleItemsIDs2digitalItems[saleItemID] = null
-                    else
-                        throw e
+                val response = Util.connect(saleItemURL)
+                        .cookies(cookies)
+                        .ignoreHttpErrors(true)
+                        .timeout(timeout).execute()
+                val downloadPage = response.parse()
+                Util.checkNotChallenged(downloadPage, "Download page of $saleItemID")
+                when (response.statusCode()) {
+                    // The download page is not usable anymore for some reason (eg. a refund was given for the purchase)
+                    404 -> this.goneSaleItemIDs.add(saleItemID)
+                    200 -> {
+                        // Get data blob: without it, the page isn't a download page (a bot check we can't tell apart)
+                        val downloadPageJson = downloadPage.select("#pagedata").attr("data-blob")
+                        if (downloadPageJson.isEmpty()) {
+                            throw GiveUpError("Download page of $saleItemID has no data (page title: \"${downloadPage.title()}\"); " +
+                                    "treating it as a Client Challenge; giving up")
+                        }
+                        val data = gson.fromJson(downloadPageJson, ParsedBandcampData::class.java)
+                        this.saleItemsIDs2digitalItems[saleItemID] = data.digital_items[0]
+                    }
+                    else -> throw HttpStatusException("HTTP error fetching URL", response.statusCode(), "the download page of $saleItemID")
                 }
             }, retries)
 
@@ -372,10 +396,12 @@ class BandcampAPIConnector constructor(
 
         // Get statdownload JSON
         val statedownloadUglyBody: String = Util.retry({
-            Util.connect(statdownloadURL)
+            val page = Util.connect(statdownloadURL)
                     .cookies(cookies)
                     .timeout(timeout)
-                    .get().body().select("body")[0].text().toString()
+                    .get()
+            Util.checkNotChallenged(page, "Download link of $saleItemID")
+            page.body().select("body")[0].text().toString()
         }, retries)!!
 
         val prefixPattern = Pattern.compile("""if\s*\(\s*window\.Downloads\s*\)\s*\{\s*Downloads\.statResult\s*\(\s*""")

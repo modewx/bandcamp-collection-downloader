@@ -37,6 +37,8 @@ fun main(args: Array<String>) {
             BandcampCollectionDownloader.downloadAll(parsedArgs)
         } catch (e: BandCampDownloaderError) {
             System.err.println("ERROR: ${e.message}")
+        } catch (e: Throwable) {
+            System.err.println("ERROR: ${Util.describe(e)}")
         }
 
     }
